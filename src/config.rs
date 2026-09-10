@@ -135,8 +135,7 @@ pub struct Config {
   pub uda_background_process: String,
   pub uda_background_process_period: usize,
   pub uda_quick_tag_name: String,
-  pub uda_pomodoro_work: u64,
-  pub uda_pomodoro_break: u64,
+  pub uda_pomodoro_presets: Vec<(u64, u64)>,
   pub uda_pomodoro_sound: String,
   pub uda_task_report_info_location: TaskInfoLocation,
   pub uda_task_report_prompt_on_undo: bool,
@@ -236,8 +235,20 @@ impl Config {
     let uda_style_help_gauge = uda_style_help_gauge.unwrap_or_else(|| Style::default().fg(Color::Gray));
     let uda_style_command_error = uda_style_command_error.unwrap_or_else(|| Style::default().fg(Color::Red));
     let uda_quick_tag_name = Self::get_uda_quick_tag_name(data);
-    let uda_pomodoro_work = Self::get_uda_u64("uda.taskwarrior-tui.pomodoro.work", data, 25);
-    let uda_pomodoro_break = Self::get_uda_u64("uda.taskwarrior-tui.pomodoro.break", data, 5);
+    // "25/5,50/10,10/2" -> [(25,5),(50,10),(10,2)] (work/break minutes)
+    let uda_pomodoro_presets = Self::get_config("uda.taskwarrior-tui.pomodoro.presets", data)
+      .unwrap_or_else(|| "25/5,50/10,10/2".to_string())
+      .split(',')
+      .filter_map(|p| {
+        let (w, b) = p.trim().split_once('/')?;
+        Some((w.trim().parse().ok()?, b.trim().parse().ok()?))
+      })
+      .collect::<Vec<_>>();
+    let uda_pomodoro_presets = if uda_pomodoro_presets.is_empty() {
+      vec![(25, 5)]
+    } else {
+      uda_pomodoro_presets
+    };
     let uda_pomodoro_sound =
       Self::get_config("uda.taskwarrior-tui.pomodoro.sound", data).unwrap_or_else(|| "/System/Library/Sounds/Glass.aiff".to_string());
     let uda_task_report_info_location = Self::get_uda_task_report_info_location(data);
@@ -308,8 +319,7 @@ impl Config {
       uda_background_process,
       uda_background_process_period,
       uda_quick_tag_name,
-      uda_pomodoro_work,
-      uda_pomodoro_break,
+      uda_pomodoro_presets,
       uda_pomodoro_sound,
       uda_task_report_info_location,
       uda_task_report_prompt_on_undo,
@@ -880,10 +890,6 @@ impl Config {
       .unwrap_or_default()
       .parse::<usize>()
       .unwrap_or(4)
-  }
-
-  fn get_uda_u64(key: &str, data: &str, default: u64) -> u64 {
-    Self::get_config(key, data).and_then(|v| v.parse().ok()).unwrap_or(default)
   }
 
   fn get_uda_quick_tag_name(data: &str) -> String {

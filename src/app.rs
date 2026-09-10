@@ -219,7 +219,7 @@ impl TaskwarriorTui {
 
     let data = String::from_utf8_lossy(&output.stdout);
     let c = Config::new(&data, report)?;
-    let pomodoro = Pomodoro::new(c.uda_pomodoro_work, c.uda_pomodoro_break, c.uda_pomodoro_sound.clone());
+    let pomodoro = Pomodoro::new(c.uda_pomodoro_presets.clone(), c.uda_pomodoro_sound.clone());
     let kc = KeyConfig::new(&data)?;
 
     let output = std::process::Command::new(&task_exe)
@@ -565,7 +565,9 @@ impl TaskwarriorTui {
       .arg("timesheet")
       .output()
       .context("Unable to run `task timesheet`")?;
-    self.timesheet_data = String::from_utf8_lossy(&output.stdout).into_owned();
+    // taskwarrior 3.x still underlines headers with rc.color=off; strip any SGR escapes.
+    let sgr = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    self.timesheet_data = sgr.replace_all(&String::from_utf8_lossy(&output.stdout), "").into_owned();
     self.timesheet_line_count = self.timesheet_data.lines().count() as u16;
     // Scroll to end so the most recent week is visible by default.
     self.timesheet_scroll = self.timesheet_line_count.saturating_sub(self.terminal_height);
@@ -677,7 +679,7 @@ impl TaskwarriorTui {
 
   async fn pomodoro_start(&mut self) -> Result<()> {
     if let Some(task) = self.task_current() {
-      self.pomodoro.start(&self.task_exe, *task.uuid(), task.description().clone());
+      self.pomodoro.choose(&self.task_exe, *task.uuid(), task.description().clone());
       self.mode = Mode::Pomodoro;
       self.update(true).await?;
     }
@@ -688,6 +690,7 @@ impl TaskwarriorTui {
     let p = &self.pomodoro;
     let (label, color) = match p.phase {
       Phase::Idle => ("IDLE", Color::DarkGray),
+      Phase::Choose => ("CHOOSE", Color::Yellow),
       Phase::Work => ("WORK", Color::Green),
       Phase::Break => ("BREAK", Color::Blue),
     };
@@ -710,10 +713,27 @@ impl TaskwarriorTui {
       Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-      "s start/stop   b break   p (Tasks tab) start on selected",
-      Style::default().fg(Color::DarkGray),
-    )));
+    if p.phase == Phase::Choose {
+      for (i, (w, b)) in p.presets.iter().enumerate() {
+        let sel = i == p.selected;
+        let style = if sel {
+          Style::default().fg(color).add_modifier(Modifier::BOLD)
+        } else {
+          Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{} {w} / {b}", if sel { "▶" } else { " " }), style)));
+      }
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(
+        "j/k or tab: select   enter: start   esc/p: back",
+        Style::default().fg(Color::DarkGray),
+      )));
+    } else {
+      lines.push(Line::from(Span::styled(
+        "s start/stop   b break   p back to tasks",
+        Style::default().fg(Color::DarkGray),
+      )));
+    }
 
     let height = lines.len() as u16 + 2;
     let chunks = Layout::default()
@@ -3149,6 +3169,23 @@ impl TaskwarriorTui {
           }
         } else if input == self.keyconfig.previous_tab {
           self.mode = Mode::Calendar;
+        } else if input == KeyCode::Char('p') {
+          if self.pomodoro.phase == Phase::Choose {
+            self.pomodoro.phase = Phase::Idle;
+          }
+          self.mode = Mode::Tasks(Action::Report);
+        } else if self.pomodoro.phase == Phase::Choose {
+          if input == KeyCode::Down || input == self.keyconfig.down || input == KeyCode::Tab {
+            self.pomodoro.select_next();
+          } else if input == KeyCode::Up || input == self.keyconfig.up || input == KeyCode::BackTab {
+            self.pomodoro.select_prev();
+          } else if input == KeyCode::Char('\n') {
+            self.pomodoro.confirm(&self.task_exe);
+            self.update(true).await?;
+          } else if input == KeyCode::Esc {
+            self.pomodoro.phase = Phase::Idle;
+            self.mode = Mode::Tasks(Action::Report);
+          }
         } else if input == self.keyconfig.start_stop {
           if self.pomodoro.phase == Phase::Idle {
             self.pomodoro_start().await?;

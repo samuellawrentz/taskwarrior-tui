@@ -9,6 +9,8 @@ use uuid::Uuid;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
   Idle,
+  /// task picked, waiting for a preset
+  Choose,
   Work,
   Break,
 }
@@ -19,45 +21,64 @@ pub struct Pomodoro {
   pub started: Instant,
   pub length: Duration,
   pub completed: u32,
-  pub work: Duration,
-  pub rest: Duration,
+  /// (work, break) minutes
+  pub presets: Vec<(u64, u64)>,
+  pub selected: usize,
+  rest: Duration,
   pub sound: String,
 }
 
 impl Pomodoro {
-  pub fn new(work_min: u64, break_min: u64, sound: String) -> Self {
+  pub fn new(presets: Vec<(u64, u64)>, sound: String) -> Self {
     Self {
       phase: Phase::Idle,
       task: None,
       started: Instant::now(),
       length: Duration::ZERO,
       completed: 0,
-      work: Duration::from_secs(work_min * 60),
-      rest: Duration::from_secs(break_min * 60),
+      presets,
+      selected: 0,
+      rest: Duration::ZERO,
       sound,
     }
   }
 
   pub fn remaining(&self) -> Duration {
     match self.phase {
-      Phase::Idle => self.work,
+      Phase::Idle | Phase::Choose => Duration::from_secs(self.presets[self.selected].0 * 60),
       _ => self.length.saturating_sub(self.started.elapsed()),
     }
   }
 
   pub fn progress(&self) -> f64 {
-    if self.phase == Phase::Idle || self.length.is_zero() {
+    if matches!(self.phase, Phase::Idle | Phase::Choose) || self.length.is_zero() {
       return 0.0;
     }
     1.0 - self.remaining().as_secs_f64() / self.length.as_secs_f64()
   }
 
-  /// Start a work session on `task` (runs `task <uuid> start`). Stops any running session first.
-  pub fn start(&mut self, task_exe: &str, uuid: Uuid, description: String) {
+  /// Pick `task` and wait for a preset. Stops any running session first.
+  pub fn choose(&mut self, task_exe: &str, uuid: Uuid, description: String) {
     self.stop(task_exe);
-    run(task_exe, &[&uuid.to_string(), "start"]);
     self.task = Some((uuid, description));
-    self.begin(Phase::Work, self.work);
+    self.phase = Phase::Choose;
+  }
+
+  pub fn select_next(&mut self) {
+    self.selected = (self.selected + 1) % self.presets.len();
+  }
+
+  pub fn select_prev(&mut self) {
+    self.selected = (self.selected + self.presets.len() - 1) % self.presets.len();
+  }
+
+  /// Start the work session with the selected preset (runs `task <uuid> start`).
+  pub fn confirm(&mut self, task_exe: &str) {
+    let Some((uuid, _)) = &self.task else { return };
+    run(task_exe, &[&uuid.to_string(), "start"]);
+    let (work, rest) = self.presets[self.selected];
+    self.rest = Duration::from_secs(rest * 60);
+    self.begin(Phase::Work, Duration::from_secs(work * 60));
   }
 
   pub fn start_break(&mut self, task_exe: &str) {
@@ -77,7 +98,7 @@ impl Pomodoro {
 
   /// Call on every tick. Work -> Break -> Idle, with a sound + notification at each boundary.
   pub fn tick(&mut self, task_exe: &str) {
-    if self.phase == Phase::Idle || !self.remaining().is_zero() {
+    if matches!(self.phase, Phase::Idle | Phase::Choose) || !self.remaining().is_zero() {
       return;
     }
     match self.phase {
@@ -90,7 +111,7 @@ impl Pomodoro {
         self.notify("Break over.");
         self.phase = Phase::Idle;
       }
-      Phase::Idle => {}
+      Phase::Idle | Phase::Choose => {}
     }
   }
 
@@ -158,8 +179,11 @@ mod tests {
 
   #[test]
   fn idle_shows_full_work_length_and_no_progress() {
-    let p = Pomodoro::new(25, 5, String::new());
+    let mut p = Pomodoro::new(vec![(25, 5), (50, 10), (10, 2)], String::new());
     assert_eq!(p.remaining(), Duration::from_secs(1500));
     assert_eq!(p.progress(), 0.0);
+    p.select_prev();
+    assert_eq!(p.selected, 2);
+    assert_eq!(p.remaining(), Duration::from_secs(600));
   }
 }
