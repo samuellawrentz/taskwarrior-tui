@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{error::Error, process::Command};
 
 use anyhow::Result;
@@ -117,6 +118,8 @@ pub struct TaskReportTable {
   pub description_width: usize,
   pub date_time_vague_precise: bool,
   pub date_format: String,
+  /// seconds tracked in timewarrior, keyed by tag (task uuid)
+  pub worked: HashMap<String, i64>,
 }
 
 impl TaskReportTable {
@@ -165,6 +168,7 @@ impl TaskReportTable {
       description_width: 100,
       date_time_vague_precise: false,
       date_format: "%Y-%m-%d".to_string(),
+      worked: HashMap::new(),
     };
     task_report_table.export_headers(Some(data), report, task_exe)?;
     Ok(task_report_table)
@@ -490,6 +494,7 @@ impl TaskReportTable {
         d
       }
       "description.desc" | "description" => description.clone(),
+      "worked" => crate::timew::format_hm(self.worked.get(&task.uuid().to_string()).copied().unwrap_or(0)),
       "urgency" => match &task.urgency() {
         Some(f) => format!("{:.2}", *f),
         None => "0.00".to_string(),

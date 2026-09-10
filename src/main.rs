@@ -15,9 +15,11 @@ mod help;
 mod history;
 mod keyconfig;
 mod pane;
+mod pomodoro;
 mod scrollbar;
 mod table;
 mod task_report;
+mod timew;
 mod ui;
 mod utils;
 

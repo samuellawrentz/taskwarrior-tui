@@ -54,6 +54,7 @@ use crate::{
     project::ProjectsState,
     report::ReportsState,
   },
+  pomodoro::{Phase, Pomodoro, big_clock},
   scrollbar::Scrollbar,
   table::{Row, Table, TableMode, TaskwarriorTuiTableState},
   task_report::TaskReportTable,
@@ -133,6 +134,7 @@ pub enum Mode {
   Projects,
   Timesheet,
   Calendar,
+  Pomodoro,
 }
 
 pub struct TaskwarriorTui {
@@ -188,6 +190,7 @@ pub struct TaskwarriorTui {
   pub timesheet_data: String,
   pub timesheet_scroll: u16,
   pub timesheet_line_count: u16,
+  pub pomodoro: Pomodoro,
 }
 
 impl TaskwarriorTui {
@@ -216,6 +219,7 @@ impl TaskwarriorTui {
 
     let data = String::from_utf8_lossy(&output.stdout);
     let c = Config::new(&data, report)?;
+    let pomodoro = Pomodoro::new(c.uda_pomodoro_work, c.uda_pomodoro_break, c.uda_pomodoro_sound.clone());
     let kc = KeyConfig::new(&data)?;
 
     let output = std::process::Command::new(&task_exe)
@@ -286,6 +290,7 @@ impl TaskwarriorTui {
       timesheet_data: String::new(),
       timesheet_scroll: 0,
       timesheet_line_count: 0,
+      pomodoro,
     };
 
     for c in app.config.filter.chars() {
@@ -387,6 +392,11 @@ impl TaskwarriorTui {
           }
           Event::Tick => {
             debug!("Tick event");
+            let was = self.pomodoro.phase;
+            self.pomodoro.tick(&self.task_exe);
+            if was != self.pomodoro.phase {
+              self.dirty = true;
+            }
             self.update(false).await?;
           }
           Event::Closed => {
@@ -492,17 +502,19 @@ impl TaskwarriorTui {
       Mode::Projects => self.draw_projects(f, main_layout),
       Mode::Timesheet => self.draw_timesheet(f, main_layout),
       Mode::Calendar => self.draw_calendar(f, main_layout),
+      Mode::Pomodoro => self.draw_pomodoro(f, main_layout),
     }
   }
 
   fn draw_tabs(&self, f: &mut Frame, layout: Rect) {
-    let titles: Vec<&str> = vec!["Tasks", "Projects", "Timesheet", "Calendar"];
+    let titles: Vec<&str> = vec!["Tasks", "Projects", "Timesheet", "Calendar", "Pomodoro"];
     let tab_names: Vec<_> = titles.into_iter().map(Line::from).collect();
     let selected_tab = match self.mode {
       Mode::Tasks(_) => 0,
       Mode::Projects => 1,
       Mode::Timesheet => 2,
       Mode::Calendar => 3,
+      Mode::Pomodoro => 4,
     };
     let navbar_block = Block::default().style(self.config.uda_style_navbar);
     let context = Line::from(vec![
@@ -661,6 +673,64 @@ impl TaskwarriorTui {
       }
     }
     style
+  }
+
+  async fn pomodoro_start(&mut self) -> Result<()> {
+    if let Some(task) = self.task_current() {
+      self.pomodoro.start(&self.task_exe, *task.uuid(), task.description().clone());
+      self.mode = Mode::Pomodoro;
+      self.update(true).await?;
+    }
+    Ok(())
+  }
+
+  pub fn draw_pomodoro(&mut self, f: &mut Frame, rect: Rect) {
+    let p = &self.pomodoro;
+    let (label, color) = match p.phase {
+      Phase::Idle => ("IDLE", Color::DarkGray),
+      Phase::Work => ("WORK", Color::Green),
+      Phase::Break => ("BREAK", Color::Blue),
+    };
+    let task = p
+      .task
+      .as_ref()
+      .map(|(_, d)| d.as_str())
+      .unwrap_or("no task: select one in Tasks and press p");
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)))];
+    lines.push(Line::from(""));
+    lines.extend(
+      big_clock(p.remaining())
+        .into_iter()
+        .map(|r| Line::from(Span::styled(r, Style::default().fg(color)))),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(task));
+    lines.push(Line::from(Span::styled(
+      format!("completed today: {}", p.completed),
+      Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+      "s start/stop   b break   p (Tasks tab) start on selected",
+      Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = lines.len() as u16 + 2;
+    let chunks = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Min(0), Constraint::Length(height), Constraint::Length(1), Constraint::Min(0)])
+      .split(rect);
+    f.render_widget(Paragraph::new(Text::from(lines)).alignment(Alignment::Center), chunks[1]);
+
+    let gauge_width = 40.min(rect.width);
+    let gauge_rect = Rect::new(rect.x + (rect.width - gauge_width) / 2, chunks[2].y, gauge_width, 1);
+    f.render_widget(
+      LineGauge::default()
+        .ratio(p.progress())
+        .filled_style(Style::default().fg(color))
+        .label(""),
+      gauge_rect,
+    );
   }
 
   pub fn draw_calendar(&mut self, f: &mut Frame, layout: Rect) {
@@ -1675,6 +1745,7 @@ impl TaskwarriorTui {
       self.selection_follow = true;
 
       self.task_report_table.export_headers(None, &self.report, &self.task_exe)?;
+      self.task_report_table.worked = crate::timew::worked_seconds();
       self.export_tasks()?;
       if self.config.uda_task_report_use_all_tasks_for_completion {
         self.export_all_tasks()?;
@@ -3069,13 +3140,32 @@ impl TaskwarriorTui {
         let max_scroll = self.timesheet_line_count.saturating_sub(viewport);
         self.timesheet_scroll = self.timesheet_scroll.min(max_scroll);
       }
-      Mode::Calendar => {
+      Mode::Pomodoro => {
         if input == self.keyconfig.quit || input == KeyCode::Ctrl('c') {
           self.should_quit = true;
         } else if input == self.keyconfig.next_tab {
           if self.config.uda_change_focus_rotate {
             self.mode = Mode::Tasks(Action::Report);
           }
+        } else if input == self.keyconfig.previous_tab {
+          self.mode = Mode::Calendar;
+        } else if input == self.keyconfig.start_stop {
+          if self.pomodoro.phase == Phase::Idle {
+            self.pomodoro_start().await?;
+          } else {
+            self.pomodoro.stop(&self.task_exe);
+            self.update(true).await?;
+          }
+        } else if input == KeyCode::Char('b') {
+          self.pomodoro.start_break(&self.task_exe);
+          self.update(true).await?;
+        }
+      }
+      Mode::Calendar => {
+        if input == self.keyconfig.quit || input == KeyCode::Ctrl('c') {
+          self.should_quit = true;
+        } else if input == self.keyconfig.next_tab {
+          self.mode = Mode::Pomodoro;
         } else if input == self.keyconfig.previous_tab {
           self.mode = Mode::Timesheet;
         } else if input == KeyCode::Up || input == self.keyconfig.up {
@@ -3187,6 +3277,8 @@ impl TaskwarriorTui {
                 self.mode = Mode::Tasks(Action::Error);
               }
             }
+          } else if input == KeyCode::Char('p') {
+            self.pomodoro_start().await?;
           } else if input == self.keyconfig.quick_tag {
             match self.task_quick_tag() {
               Ok(_) => self.update(true).await?,
@@ -3468,7 +3560,7 @@ impl TaskwarriorTui {
             self.mode = Mode::Tasks(Action::ReportMenu);
           } else if input == self.keyconfig.previous_tab {
             if self.config.uda_change_focus_rotate {
-              self.mode = Mode::Calendar;
+              self.mode = Mode::Pomodoro;
             }
           } else if input == self.keyconfig.next_tab {
             self.mode = Mode::Projects;
