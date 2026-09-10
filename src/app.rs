@@ -507,7 +507,7 @@ impl TaskwarriorTui {
   }
 
   fn draw_tabs(&self, f: &mut Frame, layout: Rect) {
-    let titles: Vec<&str> = vec!["Tasks", "Projects", "Timesheet", "Calendar", "Pomodoro"];
+    let titles: Vec<&str> = vec!["Tasks", "Projects", "Time", "Calendar", "Pomodoro"];
     let tab_names: Vec<_> = titles.into_iter().map(Line::from).collect();
     let selected_tab = match self.mode {
       Mode::Tasks(_) => 0,
@@ -557,17 +557,8 @@ impl TaskwarriorTui {
   }
 
   pub fn update_timesheet(&mut self) -> Result<()> {
-    let output = std::process::Command::new(&self.task_exe)
-      .arg("rc.color=off")
-      .arg("rc._forcecolor=off")
-      .arg("rc.verbose=nothing")
-      .arg(format!("rc.defaultwidth={}", self.terminal_width))
-      .arg("timesheet")
-      .output()
-      .context("Unable to run `task timesheet`")?;
-    // taskwarrior 3.x still underlines headers with rc.color=off; strip any SGR escapes.
-    let sgr = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
-    self.timesheet_data = sgr.replace_all(&String::from_utf8_lossy(&output.stdout), "").into_owned();
+    // timewarrior week view (per day, per task) instead of `task timesheet`, which has no durations.
+    self.timesheet_data = crate::timew::week_report();
     self.timesheet_line_count = self.timesheet_data.lines().count() as u16;
     // Scroll to end so the most recent week is visible by default.
     self.timesheet_scroll = self.timesheet_line_count.saturating_sub(self.terminal_height);
