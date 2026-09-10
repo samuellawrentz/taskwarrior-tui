@@ -81,8 +81,10 @@ impl Pomodoro {
     self.begin(Phase::Work, Duration::from_secs(work * 60));
   }
 
+  /// Break time is tracked in timewarrior under the `break` tag.
   pub fn start_break(&mut self, task_exe: &str) {
     self.stop(task_exe);
+    run("timew", &["start", "break"]);
     self.begin(Phase::Break, self.rest);
   }
 
@@ -92,6 +94,9 @@ impl Pomodoro {
       && let Some((uuid, _)) = &self.task
     {
       run(task_exe, &[&uuid.to_string(), "stop"]);
+    }
+    if self.phase == Phase::Break {
+      run("timew", &["stop"]);
     }
     self.phase = Phase::Idle;
   }
@@ -109,7 +114,7 @@ impl Pomodoro {
       }
       Phase::Break => {
         self.notify("Break over.");
-        self.phase = Phase::Idle;
+        self.stop(task_exe);
       }
       Phase::Idle | Phase::Choose => {}
     }
@@ -129,7 +134,7 @@ impl Pomodoro {
   }
 }
 
-fn run(task_exe: &str, args: &[&str]) {
+pub fn run(task_exe: &str, args: &[&str]) {
   let _ = Command::new(task_exe).args(args).output();
 }
 

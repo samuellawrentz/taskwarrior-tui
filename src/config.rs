@@ -137,6 +137,8 @@ pub struct Config {
   pub uda_quick_tag_name: String,
   pub uda_pomodoro_presets: Vec<(u64, u64)>,
   pub uda_pomodoro_sound: String,
+  /// chores offered by the Time tab picker (`t`)
+  pub uda_timew_tags: Vec<String>,
   pub uda_task_report_info_location: TaskInfoLocation,
   pub uda_task_report_prompt_on_undo: bool,
   pub uda_task_report_prompt_on_delete: bool,
@@ -249,6 +251,12 @@ impl Config {
     } else {
       uda_pomodoro_presets
     };
+    let uda_timew_tags = Self::get_config("uda.taskwarrior-tui.timew.tags", data)
+      .unwrap_or_else(|| "lunch,dinner,workout".to_string())
+      .split(',')
+      .map(|t| t.trim().to_string())
+      .filter(|t| !t.is_empty())
+      .collect();
     let uda_pomodoro_sound =
       Self::get_config("uda.taskwarrior-tui.pomodoro.sound", data).unwrap_or_else(|| "/System/Library/Sounds/Glass.aiff".to_string());
     let uda_task_report_info_location = Self::get_uda_task_report_info_location(data);
@@ -321,6 +329,7 @@ impl Config {
       uda_quick_tag_name,
       uda_pomodoro_presets,
       uda_pomodoro_sound,
+      uda_timew_tags,
       uda_task_report_info_location,
       uda_task_report_prompt_on_undo,
       uda_task_report_prompt_on_delete,

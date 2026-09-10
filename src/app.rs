@@ -191,6 +191,8 @@ pub struct TaskwarriorTui {
   pub timesheet_scroll: u16,
   pub timesheet_line_count: u16,
   pub pomodoro: Pomodoro,
+  /// index into config.uda_timew_tags while the chore picker is open
+  pub chore_pick: Option<usize>,
 }
 
 impl TaskwarriorTui {
@@ -291,6 +293,7 @@ impl TaskwarriorTui {
       timesheet_scroll: 0,
       timesheet_line_count: 0,
       pomodoro,
+      chore_pick: None,
     };
 
     for c in app.config.filter.chars() {
@@ -647,7 +650,25 @@ impl TaskwarriorTui {
   }
 
   pub fn draw_timesheet(&mut self, f: &mut Frame, rect: Rect) {
-    let p = Paragraph::new(Text::from(self.styled_timesheet_lines())).scroll((self.timesheet_scroll, 0));
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = match self.chore_pick {
+      Some(sel) => {
+        let mut l = vec![Line::from(Span::styled("start chore:  j/k select   enter start   esc cancel", dim))];
+        l.extend(self.config.uda_timew_tags.iter().enumerate().map(|(i, t)| {
+          let style = if i == sel {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+          } else {
+            Style::default()
+          };
+          Line::from(Span::styled(format!("{} {t}", if i == sel { "▶" } else { " " }), style))
+        }));
+        l
+      }
+      None => vec![Line::from(Span::styled("t chore   s stop timer", dim))],
+    };
+    lines.push(Line::from(""));
+    lines.extend(self.styled_timesheet_lines());
+    let p = Paragraph::new(Text::from(lines)).scroll((self.timesheet_scroll, 0));
     f.render_widget(p, rect);
   }
 
@@ -3131,8 +3152,29 @@ impl TaskwarriorTui {
         self.update(false).await?;
       }
       Mode::Timesheet => {
+        let tags = &self.config.uda_timew_tags;
         if input == self.keyconfig.quit || input == KeyCode::Ctrl('c') {
           self.should_quit = true;
+        } else if let Some(i) = self.chore_pick {
+          if input == KeyCode::Down || input == self.keyconfig.down || input == KeyCode::Tab {
+            self.chore_pick = Some((i + 1) % tags.len());
+          } else if input == KeyCode::Up || input == self.keyconfig.up || input == KeyCode::BackTab {
+            self.chore_pick = Some((i + tags.len() - 1) % tags.len());
+          } else if input == KeyCode::Char('\n') {
+            // a chore replaces whatever is running: pomodoro work/break or another chore
+            self.pomodoro.stop(&self.task_exe);
+            crate::pomodoro::run("timew", &["start", &tags[i]]);
+            self.chore_pick = None;
+            self.update(true).await?;
+          } else if input == KeyCode::Esc || input == KeyCode::Char('t') {
+            self.chore_pick = None;
+          }
+        } else if input == KeyCode::Char('t') && !tags.is_empty() {
+          self.chore_pick = Some(0);
+        } else if input == self.keyconfig.start_stop {
+          self.pomodoro.stop(&self.task_exe);
+          crate::pomodoro::run("timew", &["stop"]);
+          self.update(true).await?;
         } else if input == self.keyconfig.next_tab {
           self.mode = Mode::Calendar;
         } else if input == self.keyconfig.previous_tab {
