@@ -384,7 +384,10 @@ impl TaskwarriorTui {
   pub async fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     loop {
       if self.requires_redraw {
-        terminal.clear()?;
+        // Terminal::clear() queries the cursor position over stdin, which the restarted event
+        // stream swallows after pause/resume. resize() clears without the query.
+        let size = terminal.size()?;
+        terminal.resize(Rect::new(0, 0, size.width, size.height))?;
         self.requires_redraw = false;
       }
       terminal.draw(|f| self.draw(f))?;
