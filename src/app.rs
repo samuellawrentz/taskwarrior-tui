@@ -164,6 +164,9 @@ pub struct TaskwarriorTui {
   pub task_report_info_show: bool,
   pub task_report_height: u16,
   pub task_details_scroll: u16,
+  pub detail_full: bool,
+  pub detail_lines: Vec<(String, crate::notes::Kind)>,
+  pub detail_rect: Rect,
   pub task_details_defaultwidth: u16,
   pub help_popup: Help,
   pub last_export: Option<SystemTime>,
@@ -262,6 +265,9 @@ impl TaskwarriorTui {
       previous_mode: None,
       task_report_height: 0,
       task_details_scroll: 0,
+      detail_full: false,
+      detail_lines: vec![],
+      detail_rect: Rect::default(),
       task_details_defaultwidth: 0,
       task_report_info_show: c.uda_task_report_info_show,
       task_info_location_override: None,
@@ -393,6 +399,7 @@ impl TaskwarriorTui {
             debug!("Received paste of {} bytes", paste.len());
             self.handle_paste(&paste);
           }
+          Event::Click(col, row) => self.click(col, row),
           Event::Tick => {
             debug!("Tick event");
             let was = self.pomodoro.phase;
@@ -1522,6 +1529,10 @@ impl TaskwarriorTui {
     let task_id = self.tasks[selected].id().unwrap_or_default();
     let task_uuid = *self.tasks[selected].uuid();
 
+    if !self.detail_full {
+      self.draw_task_notes(f, rect);
+      return;
+    }
     let data = match self.task_details.get(&task_uuid) {
       Some(s) => s.clone(),
       None => "Loading task details ...".to_string(),
@@ -1534,6 +1545,76 @@ impl TaskwarriorTui {
       .block(Block::default().borders(Borders::TOP))
       .scroll((self.task_details_scroll, 0));
     f.render_widget(p, rect);
+  }
+
+  fn draw_task_notes(&mut self, f: &mut Frame, rect: Rect) {
+    use crate::notes::Kind;
+    let task = &self.tasks[self.current_selection];
+    let inner = rect.inner(Margin { horizontal: 1, vertical: 0 });
+    self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize);
+    self.detail_rect = inner;
+    self.task_details_scroll = std::cmp::min(
+      (self.detail_lines.len() as u16).saturating_sub(inner.height).saturating_add(2),
+      self.task_details_scroll,
+    );
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let link = Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+    let lines: Vec<Line> = self
+      .detail_lines
+      .iter()
+      .map(|(text, kind)| match kind {
+        Kind::Header => {
+          let (id, rest) = text.split_once("  ").unwrap_or((text, ""));
+          Line::from(vec![
+            Span::styled(id.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", rest), dim),
+          ])
+        }
+        Kind::Title => Line::from(Span::styled(text.clone(), Style::default().add_modifier(Modifier::BOLD))),
+        Kind::Section => Line::from(vec![
+          Span::styled(text.clone(), dim),
+          Span::styled("   A add · E edit · I info", dim),
+        ]),
+        Kind::Note => {
+          let mut spans = vec![];
+          let mut last = 0;
+          for m in crate::notes::URL_RE.find_iter(text) {
+            spans.push(Span::raw(text[last..m.start()].to_string()));
+            spans.push(Span::styled(m.as_str().to_string(), link));
+            last = m.end();
+          }
+          spans.push(Span::raw(text[last..].to_string()));
+          Line::from(spans)
+        }
+      })
+      .collect();
+    let p = Paragraph::new(lines)
+      .block(Block::default().borders(Borders::TOP))
+      .scroll((self.task_details_scroll, 0));
+    f.render_widget(p, rect);
+  }
+
+  /// Left click inside the detail pane: open the link under the cursor.
+  pub fn click(&mut self, col: u16, row: u16) {
+    let r = self.detail_rect;
+    if self.detail_full || !self.task_report_info_show || !r.contains(Position { x: col, y: row }) || row == r.y {
+      return;
+    }
+    let idx = (row - r.y - 1 + self.task_details_scroll) as usize;
+    if let Some((line, _)) = self.detail_lines.get(idx) {
+      if let Some(url) = crate::notes::url_at(line, (col - r.x) as usize) {
+        crate::notes::open_url(&url);
+      }
+    }
+  }
+
+  pub async fn task_notes_edit(&mut self) -> Result<(), String> {
+    let Some(task) = self.task_current() else { return Ok(()) };
+    self.pause_tui().await.unwrap();
+    let r = crate::notes::edit(&self.task_exe, &task);
+    self.current_selection_uuid = Some(*task.uuid());
+    self.resume_tui().await.unwrap();
+    r
   }
 
   fn task_details_scroll_up(&mut self) {
@@ -3597,6 +3678,18 @@ impl TaskwarriorTui {
             }
           } else if input == self.keyconfig.shortcut9 {
             match self.task_shortcut(9).await {
+              Ok(_) => self.update(true).await?,
+              Err(e) => {
+                self.update(true).await?;
+                self.error = Some(e);
+                self.mode = Mode::Tasks(Action::Error);
+              }
+            }
+          } else if input == KeyCode::Char('I') {
+            self.detail_full = !self.detail_full;
+            self.task_details_scroll = 0;
+          } else if input == KeyCode::Char('E') {
+            match self.task_notes_edit().await {
               Ok(_) => self.update(true).await?,
               Err(e) => {
                 self.update(true).await?;

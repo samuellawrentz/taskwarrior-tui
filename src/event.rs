@@ -1,6 +1,6 @@
 use crossterm::event::{
   KeyCode::{BackTab, Backspace, Char, Delete, Down, End, Enter, Esc, F, Home, Insert, Left, Null, PageDown, PageUp, Right, Tab, Up},
-  KeyEvent, KeyModifiers, MouseEventKind,
+  KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
 };
 use futures::StreamExt;
 use log::{Level, LevelFilter, debug, error, info, log_enabled, trace, warn};
@@ -14,6 +14,7 @@ use tokio::{
 pub enum Event<I> {
   Input(I),
   Paste(String),
+  Click(u16, u16),
   Tick,
   Closed,
 }
@@ -134,6 +135,10 @@ impl EventLoop {
                               let key = match mouse.kind {
                                   MouseEventKind::ScrollUp => Some(KeyCode::Up),
                                   MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                                  MouseEventKind::Down(MouseButton::Left) => {
+                                      _tx.send(Event::Click(mouse.column, mouse.row)).unwrap_or_else(|_| warn!("Unable to send click event"));
+                                      None
+                                  }
                                   _ => None,
                               };
                               if let Some(key) = key {
