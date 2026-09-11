@@ -2483,12 +2483,14 @@ impl TaskwarriorTui {
             for s in cmd.iter().skip(1) {
               command.arg(s);
             }
-            if let Ok(output) = command.output() {
-              if !output.status.success() {
-                break;
+            // Keep the loop alive on failure (e.g. `task sync` with the network down);
+            // upstream broke out permanently on the first non-zero exit.
+            match command.output() {
+              Ok(output) if !output.status.success() => {
+                warn!("background process failed: {}", String::from_utf8_lossy(&output.stderr).trim());
               }
-            } else {
-              break;
+              Err(e) => warn!("background process could not start: {}", e),
+              Ok(_) => {}
             }
           }
           None => break,
