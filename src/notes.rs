@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use chrono::{Local, TimeZone};
 use regex::Regex;
-use task_hookrs::task::Task;
+use task_hookrs::{task::Task, uda::UDAValue};
 use unicode_width::UnicodeWidthStr;
 
 use crate::task_report::vague_format_date_time;
@@ -16,6 +16,8 @@ pub enum Kind {
   Title,
   Section,
   Note,
+  /// `Label value · Label value`; labels drawn dim
+  Props,
 }
 
 /// Word-wrap; a word longer than `width` gets its own line untouched so URLs stay intact.
@@ -39,7 +41,7 @@ pub fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
   lines
 }
 
-pub fn render(task: &Task, width: usize) -> Vec<(String, Kind)> {
+pub fn render(task: &Task, width: usize, virtual_tags: &[String]) -> Vec<(String, Kind)> {
   let mut out = vec![];
   let updated = task
     .modified()
@@ -54,6 +56,26 @@ pub fn render(task: &Task, width: usize) -> Vec<(String, Kind)> {
   for l in wrap(task.description(), width, "") {
     out.push((l, Kind::Title));
   }
+  let uda = |k: &str| match task.uda().get(k) {
+    Some(UDAValue::Str(v)) => v.clone(),
+    Some(UDAValue::U64(v)) => v.to_string(),
+    Some(UDAValue::F64(v)) => v.to_string(),
+    None => "-".into(),
+  };
+  let mut props = vec![format!("Owner {}", uda("owner")), format!("From {}", uda("from"))];
+  if let Some(d) = task.due() {
+    props.push(format!("Due {}", vague_format_date_time(Local::now().naive_utc(), **d, false)));
+  }
+  // the TUI appends virtual tags (PENDING, UNBLOCKED, ...) to tags in memory
+  let tags: Vec<&str> = task
+    .tags()
+    .map(|t| t.iter().filter(|t| !virtual_tags.contains(t)).map(String::as_str).collect())
+    .unwrap_or_default();
+  if !tags.is_empty() {
+    props.push(format!("Tags {}", tags.join(" ")));
+  }
+  out.push((String::new(), Kind::Note));
+  out.push((props.join(" · "), Kind::Props));
   out.push((String::new(), Kind::Note));
   let notes = task.annotations().map(|a| a.as_slice()).unwrap_or(&[]);
   out.push((format!("Notes ({})", notes.len()), Kind::Section));

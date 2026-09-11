@@ -1554,7 +1554,7 @@ impl TaskwarriorTui {
     use crate::notes::Kind;
     let task = &self.tasks[self.current_selection];
     let inner = rect.inner(Margin { horizontal: 1, vertical: 0 });
-    self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize);
+    self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize, &self.task_report_table.virtual_tags);
     self.detail_rect = inner;
     self.task_details_scroll = std::cmp::min(
       (self.detail_lines.len() as u16).saturating_sub(inner.height).saturating_add(2),
@@ -1574,6 +1574,19 @@ impl TaskwarriorTui {
           ])
         }
         Kind::Title => Line::from(Span::styled(text.clone(), Style::default().add_modifier(Modifier::BOLD))),
+        Kind::Props => Line::from(
+          text
+            .split(" · ")
+            .enumerate()
+            .flat_map(|(i, seg)| {
+              let (label, value) = seg.split_once(' ').unwrap_or((seg, ""));
+              vec![
+                Span::styled(format!("{}{} ", if i > 0 { " · " } else { "" }, label), dim),
+                Span::raw(value.to_string()),
+              ]
+            })
+            .collect::<Vec<_>>(),
+        ),
         Kind::Section => Line::from(vec![
           Span::styled(text.clone(), dim),
           Span::styled("   A add · E edit · I info", dim),
