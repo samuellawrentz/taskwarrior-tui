@@ -150,6 +150,8 @@ pub struct TaskwarriorTui {
   pub tasks: Vec<Task>,
   pub all_tasks: Vec<Task>,
   pub task_details: HashMap<Uuid, String>,
+  /// related uuid prefix -> "#id description", for tasks outside the current report
+  pub related_cache: HashMap<String, String>,
   pub task_details_modified: HashMap<Uuid, Option<Date>>,
   pub marked: HashSet<Uuid>,
   // stores index of current task that is highlighted
@@ -252,6 +254,7 @@ impl TaskwarriorTui {
       tasks: vec![],
       all_tasks: vec![],
       task_details: HashMap::new(),
+      related_cache: HashMap::new(),
       task_details_modified: HashMap::new(),
       marked: HashSet::new(),
       current_selection: 0,
@@ -1640,12 +1643,19 @@ impl TaskwarriorTui {
     use crate::notes::Kind;
     let task = &self.tasks[self.current_selection];
     let inner = rect.inner(Margin { horizontal: 1, vertical: 0 });
-    // ponytail: resolves against the current report only; a related task outside it shows as its uuid prefix
-    let related: Vec<String> = crate::notes::related_ids(task)
+    let prefixes = crate::notes::related_ids(task);
+    for p in &prefixes {
+      if !self.related_cache.contains_key(p) && !self.tasks.iter().any(|t| t.uuid().to_string().starts_with(p.as_str())) {
+        let line = self.resolve_related(p);
+        self.related_cache.insert(p.clone(), line);
+      }
+    }
+    let task = &self.tasks[self.current_selection];
+    let related: Vec<String> = prefixes
       .iter()
       .map(|p| match self.tasks.iter().find(|t| t.uuid().to_string().starts_with(p.as_str())) {
         Some(t) => format!("#{}  {}", t.id().unwrap_or_default(), t.description()),
-        None => format!("#?  {}", p),
+        None => self.related_cache.get(p).cloned().unwrap_or_else(|| p.clone()),
       })
       .collect();
     self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize, &self.task_report_table.virtual_tags, &related);
@@ -1681,10 +1691,7 @@ impl TaskwarriorTui {
             })
             .collect::<Vec<_>>(),
         ),
-        Kind::Section => Line::from(vec![
-          Span::styled(text.clone(), dim),
-          Span::styled("   A add · E edit · I info", dim),
-        ]),
+        Kind::Section => Line::from(Span::styled(text.clone(), dim)),
         Kind::Note => {
           let mut spans = vec![];
           let mut last = 0;
@@ -1738,6 +1745,21 @@ impl TaskwarriorTui {
   fn task_by_index(&self, i: usize) -> Option<Task> {
     let tasks = &self.tasks;
     if i >= tasks.len() { None } else { Some(tasks[i].clone()) }
+  }
+
+  /// A related task can sit outside the active report/context, so ask taskwarrior directly.
+  fn resolve_related(&self, prefix: &str) -> String {
+    let out = std::process::Command::new(&self.task_exe)
+      .args(["rc.context=none", "rc.verbose=nothing", prefix, "export"])
+      .output();
+    let tasks: Vec<Task> = out.ok().and_then(|o| import(o.stdout.as_slice()).ok()).unwrap_or_default();
+    match tasks.first() {
+      Some(t) => match t.id().unwrap_or_default() {
+        0 => format!("#-  {}  ({:?})", t.description(), t.status()).to_lowercase(),
+        id => format!("#{}  {}", id, t.description()),
+      },
+      None => format!("#?  {}", prefix),
+    }
   }
 
   fn task_by_uuid(&self, uuid: Uuid) -> Option<Task> {

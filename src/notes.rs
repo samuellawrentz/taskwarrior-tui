@@ -95,7 +95,7 @@ pub fn render(task: &Task, width: usize, virtual_tags: &[String], related: &[Str
     out.push((String::new(), Kind::Note));
   }
   let notes = task.annotations().map(|a| a.as_slice()).unwrap_or(&[]);
-  out.push((format!("Notes ({})", notes.len()), Kind::Section));
+  out.push((format!("Notes ({})   A add · E edit · I info", notes.len()), Kind::Section));
   for a in notes {
     let ts = Local.from_utc_datetime(a.entry()).format("%Y-%m-%d %H:%M").to_string();
     for l in wrap(&format!("{}  {}", ts, a.description()), width, "  ") {
