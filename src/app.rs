@@ -1640,7 +1640,15 @@ impl TaskwarriorTui {
     use crate::notes::Kind;
     let task = &self.tasks[self.current_selection];
     let inner = rect.inner(Margin { horizontal: 1, vertical: 0 });
-    self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize, &self.task_report_table.virtual_tags);
+    // ponytail: resolves against the current report only; a related task outside it shows as its uuid prefix
+    let related: Vec<String> = crate::notes::related_ids(task)
+      .iter()
+      .map(|p| match self.tasks.iter().find(|t| t.uuid().to_string().starts_with(p.as_str())) {
+        Some(t) => format!("#{}  {}", t.id().unwrap_or_default(), t.description()),
+        None => format!("#?  {}", p),
+      })
+      .collect();
+    self.detail_lines = crate::notes::render(task, inner.width.saturating_sub(1) as usize, &self.task_report_table.virtual_tags, &related);
     self.detail_rect = inner;
     self.task_details_scroll = std::cmp::min(
       (self.detail_lines.len() as u16).saturating_sub(inner.height).saturating_add(2),

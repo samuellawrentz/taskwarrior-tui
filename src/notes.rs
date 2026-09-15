@@ -41,7 +41,15 @@ pub fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
   lines
 }
 
-pub fn render(task: &Task, width: usize, virtual_tags: &[String]) -> Vec<(String, Kind)> {
+/// `related`: pre-resolved "#id description" lines for the task's `related` UDA (see relate.sh).
+pub fn related_ids(task: &Task) -> Vec<String> {
+  match task.uda().get("related") {
+    Some(UDAValue::Str(v)) => v.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+    _ => vec![],
+  }
+}
+
+pub fn render(task: &Task, width: usize, virtual_tags: &[String], related: &[String]) -> Vec<(String, Kind)> {
   let mut out = vec![];
   let updated = task
     .modified()
@@ -77,6 +85,15 @@ pub fn render(task: &Task, width: usize, virtual_tags: &[String]) -> Vec<(String
   out.push((String::new(), Kind::Note));
   out.push((props.join(" · "), Kind::Props));
   out.push((String::new(), Kind::Note));
+  if !related.is_empty() {
+    out.push((format!("Related ({})", related.len()), Kind::Section));
+    for r in related {
+      for l in wrap(r, width, "  ") {
+        out.push((l, Kind::Note));
+      }
+    }
+    out.push((String::new(), Kind::Note));
+  }
   let notes = task.annotations().map(|a| a.as_slice()).unwrap_or(&[]);
   out.push((format!("Notes ({})", notes.len()), Kind::Section));
   for a in notes {
