@@ -139,6 +139,8 @@ pub struct Config {
   pub uda_pomodoro_sound: String,
   /// chores offered by the Time tab picker (`t`)
   pub uda_timew_tags: Vec<String>,
+  /// (key, spec) from `uda.taskwarrior-tui.picker.<key>`
+  pub uda_pickers: Vec<(char, String)>,
   pub uda_task_report_info_location: TaskInfoLocation,
   pub uda_task_report_prompt_on_undo: bool,
   pub uda_task_report_prompt_on_delete: bool,
@@ -251,6 +253,7 @@ impl Config {
     } else {
       uda_pomodoro_presets
     };
+    let uda_pickers = Self::get_uda_pickers(data);
     let uda_timew_tags = Self::get_config("uda.taskwarrior-tui.timew.tags", data)
       .unwrap_or_else(|| "lunch,dinner,workout".to_string())
       .split(',')
@@ -330,6 +333,7 @@ impl Config {
       uda_pomodoro_presets,
       uda_pomodoro_sound,
       uda_timew_tags,
+      uda_pickers,
       uda_task_report_info_location,
       uda_task_report_prompt_on_undo,
       uda_task_report_prompt_on_delete,
@@ -366,6 +370,19 @@ impl Config {
       v.push(s);
     }
     v
+  }
+
+  /// `task show` lines: `uda.taskwarrior-tui.picker.o   owner` / `...picker.D   due:eod,eow`
+  fn get_uda_pickers(data: &str) -> Vec<(char, String)> {
+    data
+      .lines()
+      .filter_map(|l| {
+        let mut it = l.strip_prefix("uda.taskwarrior-tui.picker.")?.split_whitespace();
+        let key: Vec<char> = it.next()?.chars().collect();
+        let spec = it.next()?;
+        (key.len() == 1).then(|| (key[0], spec.to_string()))
+      })
+      .collect()
   }
 
   fn get_uda_style(config: &str, data: &str) -> Option<Style> {

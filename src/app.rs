@@ -54,6 +54,7 @@ use crate::{
     project::ProjectsState,
     report::ReportsState,
   },
+  picker::Picker,
   pomodoro::{Phase, Pomodoro, big_clock},
   scrollbar::Scrollbar,
   table::{Row, Table, TableMode, TaskwarriorTuiTableState},
@@ -194,6 +195,7 @@ pub struct TaskwarriorTui {
   pub timesheet_scroll: u16,
   pub timesheet_line_count: u16,
   pub pomodoro: Pomodoro,
+  pub picker: Option<Picker>,
   /// index into config.uda_timew_tags while the chore picker is open
   pub chore_pick: Option<usize>,
 }
@@ -299,6 +301,7 @@ impl TaskwarriorTui {
       timesheet_scroll: 0,
       timesheet_line_count: 0,
       pomodoro,
+      picker: None,
       chore_pick: None,
     };
 
@@ -752,7 +755,7 @@ impl TaskwarriorTui {
       )));
     } else {
       lines.push(Line::from(Span::styled(
-        "s start/stop   b break   p back to tasks",
+        "s start/stop   b break   P back to tasks",
         Style::default().fg(Color::DarkGray),
       )));
     }
@@ -1136,6 +1139,19 @@ impl TaskwarriorTui {
         );
         self.draw_report_menu(f, 80, 50);
       }
+      Action::Picker => {
+        self.draw_command(
+          f,
+          rects[1],
+          self.filter.as_str(),
+          ("Filter Tasks".into(), None),
+          Self::get_position(&self.filter),
+          false,
+          self.error.clone(),
+          None,
+        );
+        self.draw_picker(f);
+      }
       Action::DonePrompt => {
         let label = if task_ids.len() > 1 {
           format!("Done Tasks {}?", task_ids.join(","))
@@ -1250,6 +1266,76 @@ impl TaskwarriorTui {
 
     f.render_widget(gauge, chunks[1]);
     f.render_widget(&self.help_popup, chunks[0]);
+  }
+
+  fn draw_picker(&mut self, f: &mut Frame) {
+    let Some(p) = &self.picker else { return };
+    let items = p.filtered();
+    let area = centered_rect(40, 50, f.area());
+    f.render_widget(Clear, area);
+    let chunks = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Length(3), Constraint::Min(0)])
+      .split(area);
+    f.render_widget(
+      Paragraph::new(format!(" {}", p.search)).block(
+        Block::default()
+          .borders(Borders::ALL)
+          .border_type(BorderType::Rounded)
+          .title(Span::styled(format!("{}  (type to filter, Enter applies)", p.attr), Style::default().add_modifier(Modifier::BOLD))),
+      ),
+      chunks[0],
+    );
+    f.set_cursor_position(Position {
+      x: (chunks[0].x + 2 + p.search.len() as u16).min(chunks[0].x + chunks[0].width.saturating_sub(2)),
+      y: chunks[0].y + 1,
+    });
+    let visible = chunks[1].height.saturating_sub(2) as usize;
+    let first = p.selected.saturating_sub(visible.saturating_sub(1));
+    let lines: Vec<Line> = items
+      .iter()
+      .enumerate()
+      .skip(first)
+      .take(visible)
+      .map(|(i, item)| {
+        let (mark, style) = if i == p.selected {
+          (self.config.uda_selection_indicator.as_str(), Style::default().add_modifier(Modifier::BOLD))
+        } else {
+          ("  ", Style::default())
+        };
+        Line::from(Span::styled(format!("{mark}{item}"), style))
+      })
+      .collect();
+    f.render_widget(
+      Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)),
+      chunks[1],
+    );
+  }
+
+  /// Run `task <uuid> modify <attr>:<value>` (or `+tag`/`-tag`) for every selected task.
+  pub fn picker_apply(&self) -> Result<(), String> {
+    let Some(p) = &self.picker else { return Ok(()) };
+    let value = p.value();
+    if value.is_empty() || self.tasks.is_empty() {
+      return Ok(());
+    }
+    for uuid in self.selected_task_uuids() {
+      let has_tag = self
+        .task_by_uuid(uuid)
+        .is_some_and(|t| t.tags().is_some_and(|tags| tags.iter().any(|t| *t == value)));
+      let arg = p.modify_arg(&value, has_tag);
+      let out = std::process::Command::new(&self.task_exe)
+        .args(["rc.bulk=0", "rc.confirmation=off", "rc.dependency.confirmation=off", "rc.recurrence.confirmation=off"])
+        .arg(uuid.to_string())
+        .arg("modify")
+        .arg(&arg)
+        .output()
+        .map_err(|e| format!("Cannot run `task modify {arg}`: {e}"))?;
+      if !out.status.success() {
+        return Err(format!("modify {arg} failed: {}", String::from_utf8_lossy(&out.stdout).trim()));
+      }
+    }
+    Ok(())
   }
 
   fn draw_context_menu(&mut self, f: &mut Frame, percent_x: u16, percent_y: u16) {
@@ -3301,7 +3387,7 @@ impl TaskwarriorTui {
           }
         } else if input == self.keyconfig.previous_tab {
           self.mode = Mode::Calendar;
-        } else if input == KeyCode::Char('p') {
+        } else if input == KeyCode::Char('P') {
           if self.pomodoro.phase == Phase::Choose {
             self.pomodoro.phase = Phase::Idle;
           }
@@ -3446,7 +3532,7 @@ impl TaskwarriorTui {
                 self.mode = Mode::Tasks(Action::Error);
               }
             }
-          } else if input == KeyCode::Char('p') {
+          } else if input == KeyCode::Char('P') {
             self.pomodoro_start().await?;
           } else if input == self.keyconfig.quick_tag {
             match self.task_quick_tag() {
@@ -3745,6 +3831,54 @@ impl TaskwarriorTui {
             }
           } else if input == self.keyconfig.next_tab {
             self.mode = Mode::Projects;
+          } else if let Some((_, spec)) = self.config.uda_pickers.iter().find(|(k, _)| input == KeyCode::Char(*k)) {
+            self.picker = Some(Picker::open(&self.task_exe, spec));
+            self.mode = Mode::Tasks(Action::Picker);
+          }
+        }
+        Action::Picker => {
+          match input {
+            KeyCode::Esc => {
+              self.picker = None;
+              self.mode = Mode::Tasks(Action::Report);
+            }
+            KeyCode::Char('\n') => {
+              let r = self.picker_apply();
+              self.picker = None;
+              match r {
+                Ok(_) => {
+                  self.mode = Mode::Tasks(Action::Report);
+                  self.update(true).await?;
+                }
+                Err(e) => {
+                  self.error = Some(e);
+                  self.mode = Mode::Tasks(Action::Error);
+                }
+              }
+            }
+            KeyCode::Backspace | KeyCode::Ctrl('h') => {
+              if let Some(p) = &mut self.picker {
+                p.search.pop();
+                p.selected = 0;
+              }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+              if let Some(p) = &mut self.picker {
+                p.next();
+              }
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+              if let Some(p) = &mut self.picker {
+                p.prev();
+              }
+            }
+            KeyCode::Char(c) => {
+              if let Some(p) = &mut self.picker {
+                p.search.push(c);
+                p.selected = 0;
+              }
+            }
+            _ => {}
           }
         }
         Action::ContextMenu => {

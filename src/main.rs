@@ -15,6 +15,7 @@ mod help;
 mod history;
 mod keyconfig;
 mod pane;
+mod picker;
 mod notes;
 mod pomodoro;
 mod scrollbar;

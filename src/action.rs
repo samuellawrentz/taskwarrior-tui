@@ -10,6 +10,7 @@ pub enum Action {
   HelpPopup,
   ContextMenu,
   ReportMenu,
+  Picker,
   Jump,
   DeletePrompt,
   UndoPrompt,
