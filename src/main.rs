@@ -19,6 +19,7 @@ mod picker;
 mod notes;
 mod pomodoro;
 mod scrollbar;
+mod search;
 mod table;
 mod task_report;
 mod timew;

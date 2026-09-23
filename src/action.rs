@@ -1,7 +1,7 @@
 #[derive(Clone, PartialEq, Eq, Debug, Copy)]
 pub enum Action {
   Report,
-  Filter,
+  Search,
   Add,
   Annotate,
   Subprocess,

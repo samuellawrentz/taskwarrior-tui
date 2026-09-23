@@ -57,6 +57,7 @@ use crate::{
   picker::Picker,
   pomodoro::{Phase, Pomodoro, big_clock},
   scrollbar::Scrollbar,
+  search::{self, TaskSearch},
   table::{Row, Table, TableMode, TaskwarriorTuiTableState},
   task_report::TaskReportTable,
   ui, utils,
@@ -200,6 +201,7 @@ pub struct TaskwarriorTui {
   pub picker: Option<Picker>,
   /// index into config.uda_timew_tags while the chore picker is open
   pub chore_pick: Option<usize>,
+  pub search: Option<TaskSearch>,
 }
 
 impl TaskwarriorTui {
@@ -306,6 +308,7 @@ impl TaskwarriorTui {
       pomodoro,
       picker: None,
       chore_pick: None,
+      search: None,
     };
 
     for c in app.config.filter.chars() {
@@ -455,11 +458,6 @@ impl TaskwarriorTui {
       Mode::Tasks(Action::Modify) => {
         self.command_history.reset();
         Self::insert_text(&mut self.modify, text, &mut self.changes);
-        self.update_input_for_completion();
-      }
-      Mode::Tasks(Action::Filter) => {
-        self.filter_history.reset();
-        Self::insert_text(&mut self.filter, text, &mut self.changes);
         self.update_input_for_completion();
       }
       Mode::Tasks(Action::Subprocess | Action::Jump) => {
@@ -936,32 +934,18 @@ impl TaskwarriorTui {
           None,
         );
       }
-      Action::Filter => {
-        let position = Self::get_position(&self.filter);
-        if self.show_completion_pane {
-          self.draw_completion_pop_up(f, rects[1], position);
-        }
-        let ghost = if !self.show_completion_pane {
-          self.completion_list.ghost_text()
-        } else {
-          None
-        };
+      Action::Search => {
         self.draw_command(
           f,
           rects[1],
           self.filter.as_str(),
-          (
-            Span::styled("Filter Tasks", Style::default().add_modifier(Modifier::BOLD)),
-            self
-              .history_status
-              .as_ref()
-              .map(|s| Span::styled(s, Style::default().add_modifier(Modifier::BOLD))),
-          ),
-          position,
-          true,
+          ("Filter Tasks".into(), None),
+          Self::get_position(&self.filter),
+          false,
           self.error.clone(),
-          ghost.as_deref(),
+          None,
         );
+        self.draw_search(f);
       }
       Action::Log => {
         if self.config.uda_auto_insert_double_quotes_on_log && self.command.is_empty() {
@@ -1307,6 +1291,64 @@ impl TaskwarriorTui {
           ("  ", Style::default())
         };
         Line::from(Span::styled(format!("{mark}{item}"), style))
+      })
+      .collect();
+    f.render_widget(
+      Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)),
+      chunks[1],
+    );
+  }
+
+  fn draw_search(&mut self, f: &mut Frame) {
+    let Some(s) = &self.search else { return };
+    let query = s.query.clone();
+    let selected = s.selected;
+    let ranked = search::rank(&query, &self.tasks);
+    let area = centered_rect(60, 60, f.area());
+    f.render_widget(Clear, area);
+    let chunks = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Length(3), Constraint::Min(0)])
+      .split(area);
+    f.render_widget(
+      Paragraph::new(format!(" {query}")).block(
+        Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(Span::styled(
+          "search  (fuzzy: title, project, tags, notes · Enter jumps)",
+          Style::default().add_modifier(Modifier::BOLD),
+        )),
+      ),
+      chunks[0],
+    );
+    f.set_cursor_position(Position {
+      x: (chunks[0].x + 2 + query.len() as u16).min(chunks[0].x + chunks[0].width.saturating_sub(2)),
+      y: chunks[0].y + 1,
+    });
+    let visible = chunks[1].height.saturating_sub(2) as usize;
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    let lines: Vec<Line> = ranked
+      .iter()
+      .enumerate()
+      .skip(first)
+      .take(visible)
+      .map(|(i, &ti)| {
+        let task = &self.tasks[ti];
+        let (mark, style) = if i == selected {
+          (self.config.uda_selection_indicator.as_str(), Style::default().add_modifier(Modifier::BOLD))
+        } else {
+          ("  ", Style::default())
+        };
+        let mut meta_parts: Vec<String> = vec![];
+        if let Some(project) = task.project() {
+          meta_parts.push(project.clone());
+        }
+        if let Some(tags) = task.tags() {
+          meta_parts.extend(tags.iter().map(|t| format!("+{t}")));
+        }
+        let mut spans = vec![Span::styled(format!("{mark}#{} {}", task.id().unwrap_or_default(), task.description()), style)];
+        if !meta_parts.is_empty() {
+          spans.push(Span::styled(format!(" {}", meta_parts.join(" ")), Style::default().add_modifier(Modifier::DIM)));
+        }
+        Line::from(spans)
       })
       .collect();
     f.render_widget(
@@ -3690,18 +3732,8 @@ impl TaskwarriorTui {
           } else if input == self.keyconfig.help {
             self.mode = Mode::Tasks(Action::HelpPopup);
           } else if input == self.keyconfig.filter {
-            self.mode = Mode::Tasks(Action::Filter);
-            self.filter_history.reset();
-            self.history_status = Some(format!(
-              "{} / {}",
-              self
-                .filter_history
-                .history_index()
-                .unwrap_or_else(|| self.filter_history.history_len().saturating_sub(1))
-                .saturating_add(1),
-              self.filter_history.history_len()
-            ));
-            self.update_completion_list();
+            self.search = Some(TaskSearch::new());
+            self.mode = Mode::Tasks(Action::Search);
           } else if input == KeyCode::Char(':') {
             self.mode = Mode::Tasks(Action::Jump);
           } else if input == self.keyconfig.shortcut1 {
@@ -4534,126 +4566,51 @@ impl TaskwarriorTui {
             self.update_input_for_completion();
           }
         },
-        Action::Filter => match input {
+        Action::Search => match input {
           KeyCode::Esc => {
-            if self.show_completion_pane {
-              self.show_completion_pane = false;
-              self.completion_list.unselect();
-            } else {
-              self.mode = Mode::Tasks(Action::Report);
-              self.filter_history.add(self.filter.as_str());
-              if self.config.uda_reset_filter_on_esc {
-                self.filter.update("", 0, &mut self.changes);
-                for c in self.config.filter.chars() {
-                  self.filter.insert(c, 1, &mut self.changes);
-                }
-                self.update_input_for_completion();
-                self.dirty = true;
-              }
-              self.history_status = None;
-              self.update(true).await?;
-            }
+            self.search = None;
+            self.mode = Mode::Tasks(Action::Report);
           }
           KeyCode::Char('\n') => {
-            if self.show_completion_pane {
-              self.show_completion_pane = false;
-              if let Some((_, (r, _, o, _, _))) = self.completion_list.selected() {
-                Self::apply_completion_to_buffer(&mut self.filter, &r, &o, &mut self.changes);
-              }
-              self.completion_list.unselect();
-              self.dirty = true;
-            } else if self.error.is_some() {
-              self.previous_mode = Some(self.mode.clone());
-              self.mode = Mode::Tasks(Action::Error);
-            } else {
-              self.mode = Mode::Tasks(Action::Report);
-              self.filter_history.add(self.filter.as_str());
-              self.history_status = None;
-              self.update(true).await?;
-            }
-          }
-          KeyCode::Up => {
-            if self.show_completion_pane && !self.completion_list.is_empty() {
-              self.completion_list.previous();
-            } else if let Some(s) = self
-              .filter_history
-              .history_search(&self.filter.as_str()[..self.filter.pos()], HistoryDirection::Reverse)
+            if let Some(s) = &self.search
+              && let Some(&i) = search::rank(&s.query, &self.tasks).get(s.selected)
             {
-              let p = self.filter.pos();
-              self.filter.update("", 0, &mut self.changes);
-              self.filter.update(&s, std::cmp::min(p, s.len()), &mut self.changes);
-              self.history_status = Some(format!(
-                "{} / {}",
-                self
-                  .filter_history
-                  .history_index()
-                  .unwrap_or_else(|| self.filter_history.history_len().saturating_sub(1))
-                  .saturating_add(1),
-                self.filter_history.history_len()
-              ));
-              self.dirty = true;
+              self.current_selection = i;
+              self.current_selection_id = None;
+              self.current_selection_uuid = None;
+            }
+            self.search = None;
+            self.mode = Mode::Tasks(Action::Report);
+          }
+          KeyCode::Backspace | KeyCode::Ctrl('h') => {
+            if let Some(s) = &mut self.search {
+              s.query.pop();
+              s.selected = 0;
             }
           }
-          KeyCode::Down => {
-            if self.show_completion_pane && !self.completion_list.is_empty() {
-              self.completion_list.next();
-            } else if let Some(s) = self
-              .filter_history
-              .history_search(&self.filter.as_str()[..self.filter.pos()], HistoryDirection::Forward)
-            {
-              let p = self.filter.pos();
-              self.filter.update("", 0, &mut self.changes);
-              self.filter.update(&s, std::cmp::min(p, s.len()), &mut self.changes);
-              self.history_status = Some(format!(
-                "{} / {}",
-                self
-                  .filter_history
-                  .history_index()
-                  .unwrap_or_else(|| self.filter_history.history_len().saturating_sub(1))
-                  .saturating_add(1),
-                self.filter_history.history_len()
-              ));
-              self.dirty = true;
-            }
-          }
-          KeyCode::Tab | KeyCode::Ctrl('n') => {
-            if !self.completion_list.is_empty() {
-              self.update_input_for_completion();
-              let candidates = self.completion_list.candidates();
-              if candidates.len() == 1 {
-                let (r, _, o, _, _) = candidates.into_iter().next().unwrap();
-                Self::apply_completion_to_buffer(&mut self.filter, &r, &o, &mut self.changes);
-                self.show_completion_pane = false;
-                self.completion_list.unselect();
-                self.update_input_for_completion();
-                self.dirty = true;
-              } else {
-                if !self.show_completion_pane {
-                  self.show_completion_pane = true;
-                }
-                self.completion_list.next();
+          KeyCode::Down | KeyCode::Tab | KeyCode::Ctrl('n') => {
+            if let Some(s) = &mut self.search {
+              let n = search::rank(&s.query, &self.tasks).len();
+              if n > 0 {
+                s.selected = (s.selected + 1) % n;
               }
             }
           }
-          KeyCode::BackTab | KeyCode::Ctrl('p') => {
-            if self.show_completion_pane && !self.completion_list.is_empty() {
-              self.completion_list.previous();
+          KeyCode::Up | KeyCode::BackTab | KeyCode::Ctrl('p') => {
+            if let Some(s) = &mut self.search {
+              let n = search::rank(&s.query, &self.tasks).len();
+              if n > 0 {
+                s.selected = (s.selected + n - 1) % n;
+              }
             }
           }
-          KeyCode::Ctrl('r') => {
-            self.filter.update("", 0, &mut self.changes);
-            for c in self.config.filter.chars() {
-              self.filter.insert(c, 1, &mut self.changes);
+          KeyCode::Char(c) => {
+            if let Some(s) = &mut self.search {
+              s.query.push(c);
+              s.selected = 0;
             }
-            self.history_status = None;
-            self.update_input_for_completion();
-            self.dirty = true;
           }
-          _ => {
-            handle_movement(&mut self.filter, input, &mut self.changes);
-            self.update_input_for_completion();
-            self.dirty = true;
-          }
+          _ => {}
         },
         Action::DonePrompt => {
           if input == self.keyconfig.done || input == KeyCode::Char('\n') {
@@ -4725,12 +4682,7 @@ impl TaskwarriorTui {
           }
         }
         Action::Error => {
-          // since filter live updates, don't reset error status
-          // for other actions, resetting error to None is required otherwise user cannot
-          // ever successfully execute mode.
-          if self.previous_mode != Some(Mode::Tasks(Action::Filter)) {
-            self.error = None;
-          }
+          self.error = None;
           self.mode = self.previous_mode.clone().unwrap_or(Mode::Tasks(Action::Report));
           self.previous_mode = None;
         }
@@ -4749,7 +4701,7 @@ impl TaskwarriorTui {
       &self.tasks
     };
 
-    if let Mode::Tasks(Action::Modify | Action::Filter | Action::Annotate | Action::Add | Action::Log) = self.mode {
+    if let Mode::Tasks(Action::Modify | Action::Annotate | Action::Add | Action::Log) = self.mode {
       for s in [
         "project:".to_string(),
         "priority:".to_string(),
@@ -4764,7 +4716,7 @@ impl TaskwarriorTui {
       }
     }
 
-    if let Mode::Tasks(Action::Modify | Action::Filter | Action::Annotate | Action::Add | Action::Log) = self.mode {
+    if let Mode::Tasks(Action::Modify | Action::Annotate | Action::Add | Action::Log) = self.mode {
       for s in [
         ".before:",
         ".under:",
@@ -4793,7 +4745,7 @@ impl TaskwarriorTui {
       }
     }
 
-    if let Mode::Tasks(Action::Modify | Action::Filter | Action::Annotate | Action::Add | Action::Log) = self.mode {
+    if let Mode::Tasks(Action::Modify | Action::Annotate | Action::Add | Action::Log) = self.mode {
       for priority in &self.config.uda_priority_values {
         let p = priority.to_string();
         self.completion_list.insert(("priority".to_string(), p));
@@ -4848,13 +4800,6 @@ impl TaskwarriorTui {
         }
       }
     }
-
-    if self.mode == Mode::Tasks(Action::Filter) {
-      self.completion_list.insert(("status".to_string(), "pending".into()));
-      self.completion_list.insert(("status".to_string(), "completed".into()));
-      self.completion_list.insert(("status".to_string(), "deleted".into()));
-      self.completion_list.insert(("status".to_string(), "recurring".into()));
-    }
   }
 
   pub fn update_input_for_completion(&mut self) {
@@ -4867,11 +4812,6 @@ impl TaskwarriorTui {
       Mode::Tasks(Action::Modify) => {
         let i = get_start_word_under_cursor(self.modify.as_str(), self.modify.pos());
         let input = self.modify.as_str()[i..self.modify.pos()].to_string();
-        self.completion_list.input(input, "".to_string());
-      }
-      Mode::Tasks(Action::Filter) => {
-        let i = get_start_word_under_cursor(self.filter.as_str(), self.filter.pos());
-        let input = self.filter.as_str()[i..self.filter.pos()].to_string();
         self.completion_list.input(input, "".to_string());
       }
       _ => {}
