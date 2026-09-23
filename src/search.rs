@@ -18,13 +18,21 @@ pub fn haystack(task: &Task) -> String {
   if let Some(project) = task.project() {
     parts.push(project.clone());
   }
-  if let Some(tags) = task.tags() {
-    parts.extend(tags.iter().cloned());
-  }
+  parts.extend(user_tags(task).map(str::to_string));
   if let Some(annotations) = task.annotations() {
     parts.extend(annotations.iter().map(|a| a.description().clone()));
   }
   parts.join(" ")
+}
+
+/// Tags minus virtual ones (PENDING, UNBLOCKED, ...): all-uppercase, they'd match queries like "pend" on every task.
+pub fn user_tags(task: &Task) -> impl Iterator<Item = &str> {
+  task
+    .tags()
+    .into_iter()
+    .flatten()
+    .map(String::as_str)
+    .filter(|t| t.chars().any(char::is_lowercase))
 }
 
 /// Case-insensitive fzf-style match: every whitespace-separated query token must match as a

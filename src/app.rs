@@ -1341,9 +1341,7 @@ impl TaskwarriorTui {
         if let Some(project) = task.project() {
           meta_parts.push(project.clone());
         }
-        if let Some(tags) = task.tags() {
-          meta_parts.extend(tags.iter().map(|t| format!("+{t}")));
-        }
+        meta_parts.extend(search::user_tags(task).map(|t| format!("+{t}")));
         let mut spans = vec![Span::styled(format!("{mark}#{} {}", task.id().unwrap_or_default(), task.description()), style)];
         if !meta_parts.is_empty() {
           spans.push(Span::styled(format!(" {}", meta_parts.join(" ")), Style::default().add_modifier(Modifier::DIM)));
