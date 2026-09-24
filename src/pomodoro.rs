@@ -6,6 +6,12 @@ use std::{
 
 use uuid::Uuid;
 
+#[cfg(not(test))]
+const TIMEW: &str = "timew";
+/// tests must not touch real time tracking
+#[cfg(test)]
+const TIMEW: &str = "true";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
   Idle,
@@ -25,6 +31,8 @@ pub struct Pomodoro {
   pub presets: Vec<(u64, u64)>,
   pub selected: usize,
   rest: Duration,
+  /// work time left when a mid-session break paused it
+  pub paused: Option<Duration>,
   pub sound: String,
 }
 
@@ -39,6 +47,7 @@ impl Pomodoro {
       presets,
       selected: 0,
       rest: Duration::ZERO,
+      paused: None,
       sound,
     }
   }
@@ -84,8 +93,30 @@ impl Pomodoro {
   /// Break time is tracked in timewarrior under the `break` tag.
   pub fn start_break(&mut self, task_exe: &str) {
     self.stop(task_exe);
-    run("timew", &["start", "break"]);
+    run(TIMEW, &["start", "break"]);
     self.begin(Phase::Break, self.rest);
+  }
+
+  /// `b`: mid-work, pause work and spend from this session's break; again, resume work where it paused.
+  pub fn toggle_break(&mut self, task_exe: &str) {
+    match self.phase {
+      Phase::Work => {
+        let left = self.remaining();
+        self.start_break(task_exe);
+        self.paused = Some(left);
+      }
+      Phase::Break if self.paused.is_some() => self.resume(task_exe),
+      _ => self.start_break(task_exe),
+    }
+  }
+
+  fn resume(&mut self, task_exe: &str) {
+    let Some(left) = self.paused.take() else { return };
+    self.rest = self.rest.saturating_sub(self.started.elapsed());
+    self.stop(task_exe);
+    let Some((uuid, _)) = &self.task else { return };
+    run(task_exe, &[&uuid.to_string(), "start"]);
+    self.begin(Phase::Work, left);
   }
 
   /// Stop whatever is running. A work session runs `task <uuid> stop` so timewarrior records it.
@@ -96,8 +127,9 @@ impl Pomodoro {
       run(task_exe, &[&uuid.to_string(), "stop"]);
     }
     if self.phase == Phase::Break {
-      run("timew", &["stop"]);
+      run(TIMEW, &["stop"]);
     }
+    self.paused = None;
     self.phase = Phase::Idle;
   }
 
@@ -111,6 +143,10 @@ impl Pomodoro {
         self.completed += 1;
         self.notify("Pomodoro done. Take a break.");
         self.start_break(task_exe);
+      }
+      Phase::Break if self.paused.is_some() => {
+        self.notify("Break used up. Back to work.");
+        self.resume(task_exe);
       }
       Phase::Break => {
         self.notify("Break over.");
@@ -190,5 +226,26 @@ mod tests {
     p.select_prev();
     assert_eq!(p.selected, 2);
     assert_eq!(p.remaining(), Duration::from_secs(600));
+  }
+
+  #[test]
+  fn mid_work_break_pauses_work_and_spends_the_break_budget() {
+    let secs = |d: Duration| d.as_secs_f64().round() as u64;
+    let mut p = Pomodoro::new(vec![(25, 5)], String::new());
+    p.task = Some((Uuid::nil(), String::new()));
+    p.phase = Phase::Choose;
+    p.confirm("true");
+    p.started -= Duration::from_secs(10 * 60);
+
+    p.toggle_break("true");
+    assert_eq!(p.phase, Phase::Break);
+    assert_eq!(p.paused.map(secs), Some(15 * 60));
+    p.started -= Duration::from_secs(2 * 60);
+
+    p.toggle_break("true");
+    assert_eq!(p.phase, Phase::Work);
+    assert_eq!(p.paused, None);
+    assert_eq!(secs(p.remaining()), 15 * 60);
+    assert_eq!(secs(p.rest), 3 * 60);
   }
 }

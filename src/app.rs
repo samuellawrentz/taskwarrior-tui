@@ -757,10 +757,15 @@ impl TaskwarriorTui {
         Style::default().fg(Color::DarkGray),
       )));
     } else {
-      lines.push(Line::from(Span::styled(
-        "s start/stop   b break   P back to tasks",
-        Style::default().fg(Color::DarkGray),
-      )));
+      let hint = match p.paused {
+        Some(left) => format!(
+          "work paused at {:02}:{:02}   b back to work   s stop",
+          left.as_secs() / 60,
+          left.as_secs() % 60
+        ),
+        None => "s start/stop   b break   P back to tasks".to_string(),
+      };
+      lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
     }
 
     let height = lines.len() as u16 + 2;
@@ -3442,7 +3447,7 @@ impl TaskwarriorTui {
             self.update(true).await?;
           }
         } else if input == KeyCode::Char('b') {
-          self.pomodoro.start_break(&self.task_exe);
+          self.pomodoro.toggle_break(&self.task_exe);
           self.update(true).await?;
         }
       }
